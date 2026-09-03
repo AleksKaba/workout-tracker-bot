@@ -15,12 +15,22 @@ load_dotenv()
 router = Router()
 
 
-def action_keyboard():
+def yes_no_keyboard(yes_data, no_data, yes_text="Да", no_text="Нет"):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Ещё подход", callback_data="more_set")],
-        [InlineKeyboardButton(text="Новое упражнение", callback_data="new_exercise")],
-        [InlineKeyboardButton(text="Закончить тренировку", callback_data="finish")]
+        [InlineKeyboardButton(text=yes_text, callback_data=yes_data)],
+        [InlineKeyboardButton(text=no_text, callback_data=no_data)]
     ])
+
+
+def format_exercise_list(exercises):
+    lines = []
+    for ex in exercises:
+        mark = "✅" if ex["done"] else "⬜"
+        lines.append(f"{ex['number']}. {mark} {ex['name']}")
+    lines.append("")
+    lines.append("Отправьте номер упражнения, чтобы отметить его.")
+    lines.append("Когда закончите — напишите «готово».")
+    return "\n".join(lines)
 
 
 @router.message(Command("start"))
@@ -28,17 +38,79 @@ async def start_workout(message: Message, state: FSMContext):
     await state.clear()
     user_id = db.get_or_create_user(message.from_user.id, message.from_user.full_name)
     workout_id = db.create_workout(user_id)
-    await state.update_data(workout_id=workout_id, set_number=1)
-    await state.set_state(WorkoutStates.waiting_exercise)
-    await message.answer("Тренировка начата. Какое упражнение?")
+    await state.update_data(workout_id=workout_id)
+    await state.set_state(WorkoutStates.waiting_exercise_list)
+    await message.answer(
+        "Тренировка начата. Перечислите упражнения на сегодня через запятую, "
+        "например: Присед, Отжимания, Тяга"
+    )
 
 
-@router.message(WorkoutStates.waiting_exercise)
-async def handle_exercise(message: Message, state: FSMContext):
-    exercise_id = db.get_or_create_exercise(message.text.strip())
-    await state.update_data(exercise_id=exercise_id, exercise_name=message.text.strip())
+@router.message(WorkoutStates.waiting_exercise_list)
+async def handle_exercise_list(message: Message, state: FSMContext):
+    names = [n.strip() for n in message.text.split(",") if n.strip()]
+    if not names:
+        await message.answer("Не понял список. Перечислите упражнения через запятую.")
+        return
+
+    exercises = []
+    for i, name in enumerate(names, start=1):
+        exercise_id = db.get_or_create_exercise(name)
+        exercises.append({
+            "number": i,
+            "name": name,
+            "exercise_id": exercise_id,
+            "done": False
+        })
+
+    await state.update_data(exercises=exercises)
+    await state.set_state(WorkoutStates.waiting_exercise_number)
+    await message.answer(format_exercise_list(exercises))
+
+
+@router.message(WorkoutStates.waiting_exercise_number)
+async def handle_exercise_number(message: Message, state: FSMContext):
+    text = message.text.strip().lower()
+    data = await state.get_data()
+    exercises = data["exercises"]
+
+    if text == "готово":
+        await state.set_state(WorkoutStates.waiting_notes)
+        await message.answer("Есть заметки к тренировке? Если нет, напишите «нет»")
+        return
+
+    if not text.isdigit():
+        await message.answer("Отправьте номер упражнения из списка, или напишите «готово».")
+        return
+
+    number = int(text)
+    exercise = next((e for e in exercises if e["number"] == number), None)
+    if exercise is None:
+        await message.answer("Такого номера нет в списке. Попробуйте ещё раз.")
+        return
+
+    await state.update_data(current_exercise_number=number)
+    await state.set_state(WorkoutStates.waiting_confirm_done)
+    await message.answer(
+        f"«{exercise['name']}» — вы выполнили это упражнение?",
+        reply_markup=yes_no_keyboard("done_yes", "done_no")
+    )
+
+
+@router.callback_query(F.data == "done_no", WorkoutStates.waiting_confirm_done)
+async def handle_done_no(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    await state.set_state(WorkoutStates.waiting_exercise_number)
+    await callback.message.answer(format_exercise_list(data["exercises"]))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "done_yes", WorkoutStates.waiting_confirm_done)
+async def handle_done_yes(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(current_set_number=1)
     await state.set_state(WorkoutStates.waiting_weight_reps)
-    await message.answer("Вес и повторения через пробел (например: 80 8)")
+    await callback.message.answer("Вес и повторения через пробел (например: 80 8)")
+    await callback.answer()
 
 
 @router.message(WorkoutStates.waiting_weight_reps)
@@ -54,58 +126,48 @@ async def handle_weight_reps(message: Message, state: FSMContext):
     except ValueError:
         await message.answer("Вес — число, повторения — целое число. Попробуйте ещё раз.")
         return
-    await state.update_data(weight_kg=weight, reps=reps)
-    await state.set_state(WorkoutStates.waiting_feeling)
-    await message.answer("Как самочувствие (1-10)?")
-
-
-@router.message(WorkoutStates.waiting_feeling)
-async def handle_feeling(message: Message, state: FSMContext):
-    try:
-        feeling = int(message.text.strip())
-        if not (1 <= feeling <= 10):
-            raise ValueError
-    except ValueError:
-        await message.answer("Введите число от 1 до 10.")
-        return
 
     data = await state.get_data()
+    exercises = data["exercises"]
+    number = data["current_exercise_number"]
+    exercise = next(e for e in exercises if e["number"] == number)
+
     db.insert_set(
         workout_id=data["workout_id"],
-        exercise_id=data["exercise_id"],
-        set_number=data["set_number"],
-        weight_kg=data["weight_kg"],
-        reps=data["reps"],
-        rpe=feeling
+        exercise_id=exercise["exercise_id"],
+        set_number=data["current_set_number"],
+        weight_kg=weight,
+        reps=reps
     )
-    await state.set_state(WorkoutStates.waiting_next_action)
+
+    await state.set_state(WorkoutStates.waiting_more_sets)
     await message.answer(
-        f"Подход записан: {data['exercise_name']} {data['weight_kg']}кг x {data['reps']}",
-        reply_markup=action_keyboard()
+        f"Подход записан: {exercise['name']} {weight}кг x {reps}. Ещё один подход?",
+        reply_markup=yes_no_keyboard("more_set_yes", "more_set_done", yes_text="Да", no_text="Хватит")
     )
 
 
-@router.callback_query(F.data == "more_set", WorkoutStates.waiting_next_action)
-async def more_set(callback: CallbackQuery, state: FSMContext):
+@router.callback_query(F.data == "more_set_yes", WorkoutStates.waiting_more_sets)
+async def handle_more_set_yes(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
-    await state.update_data(set_number=data["set_number"] + 1)
+    await state.update_data(current_set_number=data["current_set_number"] + 1)
     await state.set_state(WorkoutStates.waiting_weight_reps)
     await callback.message.answer("Вес и повторения через пробел (например: 80 8)")
     await callback.answer()
 
 
-@router.callback_query(F.data == "new_exercise", WorkoutStates.waiting_next_action)
-async def new_exercise(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(set_number=1)
-    await state.set_state(WorkoutStates.waiting_exercise)
-    await callback.message.answer("Какое упражнение?")
-    await callback.answer()
+@router.callback_query(F.data == "more_set_done", WorkoutStates.waiting_more_sets)
+async def handle_more_set_done(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    exercises = data["exercises"]
+    number = data["current_exercise_number"]
+    for e in exercises:
+        if e["number"] == number:
+            e["done"] = True
 
-
-@router.callback_query(F.data == "finish", WorkoutStates.waiting_next_action)
-async def finish(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(WorkoutStates.waiting_notes)
-    await callback.message.answer("Есть заметки к тренировке? Если нет, напишите «нет»")
+    await state.update_data(exercises=exercises)
+    await state.set_state(WorkoutStates.waiting_exercise_number)
+    await callback.message.answer(format_exercise_list(exercises))
     await callback.answer()
 
 

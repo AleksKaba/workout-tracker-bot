@@ -57,14 +57,14 @@ def create_workout(user_id):
     return workout_id
 
 
-def insert_set(workout_id, exercise_id, set_number, weight_kg, reps, rpe):
+def insert_set(workout_id, exercise_id, set_number, weight_kg, reps):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """insert into fact_workout_set
-           (workout_id, exercise_id, set_number, weight_kg, reps, rpe)
-           values (%s, %s, %s, %s, %s, %s)""",
-        (workout_id, exercise_id, set_number, weight_kg, reps, rpe)
+           (workout_id, exercise_id, set_number, weight_kg, reps)
+           values (%s, %s, %s, %s, %s)""",
+        (workout_id, exercise_id, set_number, weight_kg, reps)
     )
     conn.commit()
     conn.close()

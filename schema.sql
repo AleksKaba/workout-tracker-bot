@@ -23,6 +23,5 @@ create table fact_workout_set (
     exercise_id  int references dim_exercise(exercise_id),
     set_number   int not null,
     weight_kg    numeric(6,2),
-    reps         int not null,
-    rpe          int check (rpe between 1 and 10)
+    reps         int not null
 );
