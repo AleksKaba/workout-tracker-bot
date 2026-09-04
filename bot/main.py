@@ -1,6 +1,6 @@
 import asyncio
-import random
 import os
+import random
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -16,11 +16,11 @@ load_dotenv()
 router = Router()
 
 STICKER_IDS = [
-    "CAACAgEAAxkBAAIBEWqaaTzKA7dN4cdXIUAiph9ADO-fAAL7AAPFiJwE5Su2-pBEE3M9BA",
-    "CAACAgIAAxkBAAIBQWqachoFGX2-GP34EKxPWmdh_IuJAAIlhwACrJ-RSDQMY-8Sdt-1PQQ",
+    "CAACAgIAAxkBAAIBRWqaclgHzj6lXSLV7iZgiCy0JEi_AAI_WQACxj84SfO3jPslJV86PQQ",
     "CAACAgIAAxkBAAIBQ2qackEuSMLOLr8HD6iwMxcqdIIMAALdeAAClqSJSlinhFLFs08kPQQ",
-    "CAACAgIAAxkBAAIBRWqaclgHzj6lXSLV7iZgiCy0JEi_AAI_WQACxj84SfO3jPslJV86PQQ"
-    ]
+    "CAACAgIAAxkBAAIBQWqachoFGX2-GP34EKxPWmdh_IuJAAIlhwACrJ-RSDQMY-8Sdt-1PQQ",
+    "CAACAgEAAxkBAAIBEWqaaTzKA7dN4cdXIUAiph9ADO-fAAL7AAPFiJwE5Su2-pBEE3M9BA",
+]
 
 
 def more_sets_keyboard():
@@ -190,9 +190,10 @@ async def handle_notes(message: Message, state: FSMContext):
     notes = None if message.text.strip().lower() == "нет" else message.text.strip()
     db.save_workout_notes(data["workout_id"], notes)
     await state.clear()
-        await message.answer("Тренировка сохранена. Молодца! 💪")
+    await message.answer("Тренировка сохранена. Молодца! 💪")
     if STICKER_IDS:
         await message.answer_sticker(random.choice(STICKER_IDS))
+
 
 @router.message(Command("history"))
 async def show_history(message: Message):
