@@ -232,3 +232,120 @@ def get_next_set_number(workout_id, exercise_id):
     result = cursor.fetchone()[0]
     conn.close()
     return result
+
+
+def get_templates(user_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "select template_id, name from dim_template where user_id = %s order by name",
+        (user_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"template_id": r[0], "name": r[1]} for r in rows]
+
+
+def template_name_exists(user_id, name):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "select 1 from dim_template where user_id = %s and name = %s",
+        (user_id, name)
+    )
+    exists = cursor.fetchone() is not None
+    conn.close()
+    return exists
+
+
+def create_template(user_id, name):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "insert into dim_template (user_id, name) values (%s, %s) returning template_id",
+        (user_id, name)
+    )
+    template_id = cursor.fetchone()[0]
+    conn.commit()
+    conn.close()
+    return template_id
+
+
+def add_template_exercise(template_id, exercise_id, position):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "insert into template_exercise (template_id, exercise_id, position) values (%s, %s, %s)",
+        (template_id, exercise_id, position)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_template_exercises(template_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """select e.exercise_id, e.name, t.position
+           from template_exercise t
+           join dim_exercise e on t.exercise_id = e.exercise_id
+           where t.template_id = %s
+           order by t.position""",
+        (template_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"exercise_id": r[0], "name": r[1], "position": r[2]} for r in rows]
+
+
+def delete_template(template_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("delete from dim_template where template_id = %s", (template_id,))
+    conn.commit()
+    conn.close()
+
+
+def rename_template(template_id, new_name):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "update dim_template set name = %s where template_id = %s",
+        (new_name, template_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_next_template_position(template_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "select coalesce(max(position), 0) + 1 from template_exercise where template_id = %s",
+        (template_id,)
+    )
+    result = cursor.fetchone()[0]
+    conn.close()
+    return result
+
+
+def remove_template_exercise(template_id, position):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "delete from template_exercise where template_id = %s and position = %s",
+        (template_id, position)
+    )
+    cursor.execute(
+        "select position, exercise_id from template_exercise where template_id = %s order by position",
+        (template_id,)
+    )
+    remaining = cursor.fetchall()
+    for i, (pos, exercise_id) in enumerate(remaining, start=1):
+        if pos != i:
+            cursor.execute(
+                "update template_exercise set position = %s where template_id = %s and position = %s",
+                (i, template_id, pos)
+            )
+    conn.commit()
+    conn.close()

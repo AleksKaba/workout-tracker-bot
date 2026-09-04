@@ -1,7 +1,9 @@
 from aiogram.fsm.state import State, StatesGroup
 
 class WorkoutStates(StatesGroup):
+    waiting_template_choice = State()
     waiting_exercise_list = State()
+    waiting_save_template_name = State()
     waiting_exercise_number = State()
     waiting_weight_reps = State()
     waiting_more_sets = State()
@@ -17,3 +19,8 @@ class EditStates(StatesGroup):
     waiting_exercise_choice = State()
     waiting_set_action = State()
     waiting_new_weight_reps = State()
+
+
+class TemplateStates(StatesGroup):
+    waiting_choice = State()
+    waiting_action = State()

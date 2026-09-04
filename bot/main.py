@@ -8,7 +8,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from dotenv import load_dotenv
 
-from states import WorkoutStates, DeleteStates, EditStates
+from states import WorkoutStates, DeleteStates, EditStates, TemplateStates
 import db
 
 load_dotenv()
@@ -123,17 +123,85 @@ def format_sets_for_edit(exercise, sets):
     return "\n".join(lines)
 
 
+def templates_choice_keyboard(templates):
+    rows = [
+        [InlineKeyboardButton(text=t["name"], callback_data=f"tpl_{t['template_id']}")]
+        for t in templates
+    ]
+    rows.append([InlineKeyboardButton(text="🆕 Новый список", callback_data="tpl_new")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def format_template_list(templates):
+    lines = [f"{i}. {t['name']}" for i, t in enumerate(templates, start=1)]
+    lines.append("")
+    lines.append("Отправьте номер шаблона, или «отмена».")
+    return "\n".join(lines)
+
+
+def format_template_view(name, exercises):
+    lines = [f"«{name}»:"]
+    for i, e in enumerate(exercises, start=1):
+        lines.append(f"{i}. {e['name']}")
+    lines.append("")
+    lines.append("Напишите «удалить N», чтобы удалить упражнение N.")
+    lines.append("Напишите «добавить: Название», чтобы добавить упражнение.")
+    lines.append("Напишите «переименовать: Новое название», чтобы переименовать шаблон.")
+    lines.append("Напишите «удалить шаблон», чтобы удалить его целиком.")
+    lines.append("Напишите «отмена», чтобы выйти.")
+    return "\n".join(lines)
+
+
 @router.message(Command("start"))
 async def start_workout(message: Message, state: FSMContext):
     await state.clear()
     user_id = db.get_or_create_user(message.from_user.id, message.from_user.full_name)
     workout_id = db.create_workout(user_id)
-    await state.update_data(workout_id=workout_id)
+    await state.update_data(workout_id=workout_id, user_id=user_id)
+
+    templates = db.get_templates(user_id)
+    if templates:
+        await state.set_state(WorkoutStates.waiting_template_choice)
+        await message.answer(
+            "Тренировка начата. Выберите шаблон или начните новый список:",
+            reply_markup=templates_choice_keyboard(templates)
+        )
+    else:
+        await state.set_state(WorkoutStates.waiting_exercise_list)
+        await message.answer(
+            "Тренировка начата. Перечислите упражнения на сегодня через запятую, "
+            "например: Присед, Отжимания, Тяга"
+        )
+
+
+@router.callback_query(F.data == "tpl_new", WorkoutStates.waiting_template_choice)
+async def handle_template_new(callback: CallbackQuery, state: FSMContext):
     await state.set_state(WorkoutStates.waiting_exercise_list)
-    await message.answer(
-        "Тренировка начата. Перечислите упражнения на сегодня через запятую, "
-        "например: Присед, Отжимания, Тяга"
+    await callback.message.answer(
+        "Перечислите упражнения на сегодня через запятую, например: Присед, Отжимания, Тяга"
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("tpl_"), WorkoutStates.waiting_template_choice)
+async def handle_template_choice(callback: CallbackQuery, state: FSMContext):
+    template_id = int(callback.data.split("_")[1])
+    tpl_exercises = db.get_template_exercises(template_id)
+
+    exercises = []
+    for i, e in enumerate(tpl_exercises, start=1):
+        exercises.append({
+            "number": i,
+            "name": e["name"],
+            "exercise_id": e["exercise_id"],
+            "done": False,
+            "sets": []
+        })
+
+    await state.update_data(exercises=exercises)
+    await state.set_state(WorkoutStates.waiting_exercise_number)
+    await callback.message.answer(format_exercise_list(exercises))
+    await callback.answer()
 
 
 @router.message(WorkoutStates.waiting_exercise_list)
@@ -155,6 +223,31 @@ async def handle_exercise_list(message: Message, state: FSMContext):
         })
 
     await state.update_data(exercises=exercises)
+    await state.set_state(WorkoutStates.waiting_save_template_name)
+    await message.answer(
+        "Хотите сохранить этот список как шаблон для будущих тренировок?\n"
+        "Если да — напишите название (например: День ног). Если нет — напишите «нет»."
+    )
+
+
+@router.message(WorkoutStates.waiting_save_template_name)
+async def handle_save_template_name(message: Message, state: FSMContext):
+    text = message.text.strip()
+    data = await state.get_data()
+    exercises = data["exercises"]
+    user_id = data["user_id"]
+
+    if text.lower() != "нет":
+        if db.template_name_exists(user_id, text):
+            await message.answer(
+                "Шаблон с таким названием уже есть. Введите другое название, или «нет», чтобы не сохранять."
+            )
+            return
+        template_id = db.create_template(user_id, text)
+        for i, ex in enumerate(exercises, start=1):
+            db.add_template_exercise(template_id, ex["exercise_id"], i)
+        await message.answer(f"Шаблон «{text}» сохранён.")
+
     await state.set_state(WorkoutStates.waiting_exercise_number)
     await message.answer(format_exercise_list(exercises))
 
@@ -504,6 +597,112 @@ async def edit_new_weight_reps(message: Message, state: FSMContext):
     await message.answer(format_sets_for_edit(exercise, new_sets))
 
 
+@router.message(Command("templates"))
+async def templates_start(message: Message, state: FSMContext):
+    await state.clear()
+    user_id = db.get_or_create_user(message.from_user.id, message.from_user.full_name)
+    templates = db.get_templates(user_id)
+    if not templates:
+        await message.answer("У вас нет сохранённых шаблонов.")
+        return
+    await state.update_data(user_id=user_id, templates=templates)
+    await state.set_state(TemplateStates.waiting_choice)
+    await message.answer(format_template_list(templates))
+
+
+@router.message(TemplateStates.waiting_choice)
+async def templates_choose(message: Message, state: FSMContext):
+    text = message.text.strip().lower()
+    if text == "отмена":
+        await state.clear()
+        await message.answer("Отменено.")
+        return
+    if not text.isdigit():
+        await message.answer("Отправьте номер шаблона из списка, или «отмена».")
+        return
+
+    data = await state.get_data()
+    templates = data["templates"]
+    index = int(text)
+    if index < 1 or index > len(templates):
+        await message.answer("Такого номера нет в списке.")
+        return
+
+    template = templates[index - 1]
+    await state.update_data(
+        target_template_id=template["template_id"],
+        target_template_name=template["name"]
+    )
+    await state.set_state(TemplateStates.waiting_action)
+    exercises = db.get_template_exercises(template["template_id"])
+    await message.answer(format_template_view(template["name"], exercises))
+
+
+@router.message(TemplateStates.waiting_action)
+async def templates_action(message: Message, state: FSMContext):
+    text = message.text.strip()
+    lower = text.lower()
+    data = await state.get_data()
+    template_id = data["target_template_id"]
+    user_id = data["user_id"]
+
+    if lower == "отмена":
+        await state.clear()
+        await message.answer("Отменено.")
+        return
+
+    if lower == "удалить шаблон":
+        db.delete_template(template_id)
+        await state.clear()
+        await message.answer("Шаблон удалён.")
+        return
+
+    if lower.startswith("переименовать:"):
+        new_name = text.split(":", 1)[1].strip()
+        if not new_name:
+            await message.answer("Укажите новое название после двоеточия.")
+            return
+        if db.template_name_exists(user_id, new_name):
+            await message.answer("Шаблон с таким названием уже есть. Введите другое.")
+            return
+        db.rename_template(template_id, new_name)
+        await state.update_data(target_template_name=new_name)
+        exercises = db.get_template_exercises(template_id)
+        await message.answer(format_template_view(new_name, exercises))
+        return
+
+    if lower.startswith("добавить:"):
+        exercise_name = text.split(":", 1)[1].strip()
+        if not exercise_name:
+            await message.answer("Укажите название упражнения после двоеточия.")
+            return
+        exercise_id = db.get_or_create_exercise(exercise_name)
+        next_position = db.get_next_template_position(template_id)
+        db.add_template_exercise(template_id, exercise_id, next_position)
+        exercises = db.get_template_exercises(template_id)
+        await message.answer(format_template_view(data["target_template_name"], exercises))
+        return
+
+    if lower.startswith("удалить "):
+        number_str = lower.replace("удалить ", "").strip()
+        if not number_str.isdigit():
+            await message.answer("Формат: «удалить 2»")
+            return
+        db.remove_template_exercise(template_id, int(number_str))
+        exercises = db.get_template_exercises(template_id)
+        if exercises:
+            await message.answer(format_template_view(data["target_template_name"], exercises))
+        else:
+            await message.answer("Упражнение удалено. В шаблоне больше ничего нет.")
+            await state.clear()
+        return
+
+    await message.answer(
+        "Не понял. Напишите «удалить N», «добавить: Название», "
+        "«переименовать: Название», «удалить шаблон» или «отмена»."
+    )
+
+
 @router.message(F.sticker)
 async def get_sticker_id(message: Message):
     await message.answer(f"file_id этого стикера:\n{message.sticker.file_id}")
@@ -517,6 +716,7 @@ async def main():
     await bot.set_my_commands([
         BotCommand(command="start", description="Начать новую тренировку"),
         BotCommand(command="history", description="Посмотреть историю тренировок"),
+        BotCommand(command="templates", description="Управление шаблонами тренировок"),
         BotCommand(command="edit", description="Изменить тренировку"),
         BotCommand(command="delete", description="Удалить тренировку"),
     ])
