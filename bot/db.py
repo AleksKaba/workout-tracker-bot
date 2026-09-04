@@ -79,3 +79,39 @@ def save_workout_notes(workout_id, notes):
     )
     conn.commit()
     conn.close()
+
+
+def get_workout_history(user_id, limit=10):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """select workout_id, started_at, notes
+           from dim_workout
+           where user_id = %s
+           order by started_at desc
+           limit %s""",
+        (user_id, limit)
+    )
+    workouts = cursor.fetchall()
+
+    history = []
+    for workout_id, started_at, notes in workouts:
+        cursor.execute(
+            """select e.name, s.set_number, s.weight_kg, s.reps
+               from fact_workout_set s
+               join dim_exercise e on s.exercise_id = e.exercise_id
+               where s.workout_id = %s
+               order by e.name, s.set_number""",
+            (workout_id,)
+        )
+        rows = cursor.fetchall()
+        exercises = {}
+        for name, set_number, weight, reps in rows:
+            exercises.setdefault(name, []).append((set_number, weight, reps))
+        history.append({
+            "started_at": started_at,
+            "notes": notes,
+            "exercises": exercises
+        })
+    conn.close()
+    return history

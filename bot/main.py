@@ -14,11 +14,13 @@ load_dotenv()
 
 router = Router()
 
+STICKER_ID = ""  # заполним на шаге 5
 
-def yes_no_keyboard(yes_data, no_data, yes_text="Да", no_text="Нет"):
+
+def more_sets_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=yes_text, callback_data=yes_data)],
-        [InlineKeyboardButton(text=no_text, callback_data=no_data)]
+        [InlineKeyboardButton(text="Ещё подход", callback_data="more_set_yes")],
+        [InlineKeyboardButton(text="Закончил упражнение", callback_data="more_set_done")]
     ])
 
 
@@ -28,9 +30,28 @@ def format_exercise_list(exercises):
         mark = "✅" if ex["done"] else "⬜"
         lines.append(f"{ex['number']}. {mark} {ex['name']}")
     lines.append("")
-    lines.append("Отправьте номер упражнения, чтобы отметить его.")
-    lines.append("Когда закончите — напишите «готово».")
+    lines.append("Отправьте номер упражнения, чтобы начать его.")
+    lines.append("Когда закончите все упражнения — напишите «готово».")
     return "\n".join(lines)
+
+
+def format_exercise_summary(exercise):
+    lines = [f"{exercise['name']} — {len(exercise['sets'])} подход(ов):"]
+    for i, (weight, reps) in enumerate(exercise["sets"], start=1):
+        lines.append(f"{i}) {weight}x{reps}")
+    return "\n".join(lines)
+
+
+def format_full_summary(exercises):
+    lines = []
+    n = 1
+    for ex in exercises:
+        if not ex["sets"]:
+            continue
+        set_parts = " ".join(f"{i}) {w}х{r}" for i, (w, r) in enumerate(ex["sets"], start=1))
+        lines.append(f"{n}. {ex['name']} {len(ex['sets'])} подход(ов): {set_parts}")
+        n += 1
+    return "\n".join(lines) if lines else "Подходов не было."
 
 
 @router.message(Command("start"))
@@ -60,7 +81,8 @@ async def handle_exercise_list(message: Message, state: FSMContext):
             "number": i,
             "name": name,
             "exercise_id": exercise_id,
-            "done": False
+            "done": False,
+            "sets": []
         })
 
     await state.update_data(exercises=exercises)
@@ -75,7 +97,9 @@ async def handle_exercise_number(message: Message, state: FSMContext):
     exercises = data["exercises"]
 
     if text == "готово":
+        summary = format_full_summary(exercises)
         await state.set_state(WorkoutStates.waiting_notes)
+        await message.answer(summary)
         await message.answer("Есть заметки к тренировке? Если нет, напишите «нет»")
         return
 
@@ -90,27 +114,8 @@ async def handle_exercise_number(message: Message, state: FSMContext):
         return
 
     await state.update_data(current_exercise_number=number)
-    await state.set_state(WorkoutStates.waiting_confirm_done)
-    await message.answer(
-        f"«{exercise['name']}» — вы выполнили это упражнение?",
-        reply_markup=yes_no_keyboard("done_yes", "done_no")
-    )
-
-
-@router.callback_query(F.data == "done_no", WorkoutStates.waiting_confirm_done)
-async def handle_done_no(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    await state.set_state(WorkoutStates.waiting_exercise_number)
-    await callback.message.answer(format_exercise_list(data["exercises"]))
-    await callback.answer()
-
-
-@router.callback_query(F.data == "done_yes", WorkoutStates.waiting_confirm_done)
-async def handle_done_yes(callback: CallbackQuery, state: FSMContext):
-    await state.update_data(current_set_number=1)
     await state.set_state(WorkoutStates.waiting_weight_reps)
-    await callback.message.answer("Вес и повторения через пробел (например: 80 8)")
-    await callback.answer()
+    await message.answer(f"«{exercise['name']}». Вес и повторения через пробел (например: 80 8)")
 
 
 @router.message(WorkoutStates.waiting_weight_reps)
@@ -132,25 +137,27 @@ async def handle_weight_reps(message: Message, state: FSMContext):
     number = data["current_exercise_number"]
     exercise = next(e for e in exercises if e["number"] == number)
 
+    set_number = len(exercise["sets"]) + 1
+    exercise["sets"].append((weight, reps))
+
     db.insert_set(
         workout_id=data["workout_id"],
         exercise_id=exercise["exercise_id"],
-        set_number=data["current_set_number"],
+        set_number=set_number,
         weight_kg=weight,
         reps=reps
     )
 
+    await state.update_data(exercises=exercises)
     await state.set_state(WorkoutStates.waiting_more_sets)
     await message.answer(
-        f"Подход записан: {exercise['name']} {weight}кг x {reps}. Ещё один подход?",
-        reply_markup=yes_no_keyboard("more_set_yes", "more_set_done", yes_text="Да", no_text="Хватит")
+        f"Вы сделали {set_number} подход {weight}x{reps}",
+        reply_markup=more_sets_keyboard()
     )
 
 
 @router.callback_query(F.data == "more_set_yes", WorkoutStates.waiting_more_sets)
 async def handle_more_set_yes(callback: CallbackQuery, state: FSMContext):
-    data = await state.get_data()
-    await state.update_data(current_set_number=data["current_set_number"] + 1)
     await state.set_state(WorkoutStates.waiting_weight_reps)
     await callback.message.answer("Вес и повторения через пробел (например: 80 8)")
     await callback.answer()
@@ -161,12 +168,12 @@ async def handle_more_set_done(callback: CallbackQuery, state: FSMContext):
     data = await state.get_data()
     exercises = data["exercises"]
     number = data["current_exercise_number"]
-    for e in exercises:
-        if e["number"] == number:
-            e["done"] = True
+    exercise = next(e for e in exercises if e["number"] == number)
+    exercise["done"] = True
 
     await state.update_data(exercises=exercises)
     await state.set_state(WorkoutStates.waiting_exercise_number)
+    await callback.message.answer(format_exercise_summary(exercise))
     await callback.message.answer(format_exercise_list(exercises))
     await callback.answer()
 
@@ -177,7 +184,34 @@ async def handle_notes(message: Message, state: FSMContext):
     notes = None if message.text.strip().lower() == "нет" else message.text.strip()
     db.save_workout_notes(data["workout_id"], notes)
     await state.clear()
-    await message.answer("Тренировка сохранена. Отличная работа!")
+    await message.answer("Тренировка сохранена. Молодца! 💪")
+    if STICKER_ID:
+        await message.answer_sticker(STICKER_ID)
+
+
+@router.message(Command("history"))
+async def show_history(message: Message):
+    user_id = db.get_or_create_user(message.from_user.id, message.from_user.full_name)
+    history = db.get_workout_history(user_id, limit=5)
+
+    if not history:
+        await message.answer("Пока нет сохранённых тренировок.")
+        return
+
+    for workout in history:
+        date_str = workout["started_at"].strftime("%d.%m.%Y %H:%M")
+        lines = [f"📅 {date_str}"]
+        for exercise_name, sets in workout["exercises"].items():
+            sets_str = ", ".join(f"{w}x{r}" for _, w, r in sets)
+            lines.append(f"— {exercise_name}: {len(sets)} подход(ов) ({sets_str})")
+        if workout["notes"]:
+            lines.append(f"Заметка: {workout['notes']}")
+        await message.answer("\n".join(lines))
+
+
+@router.message(F.sticker)
+async def get_sticker_id(message: Message):
+    await message.answer(f"file_id этого стикера:\n{message.sticker.file_id}")
 
 
 async def main():
