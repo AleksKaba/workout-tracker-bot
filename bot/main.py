@@ -14,7 +14,7 @@ load_dotenv()
 
 router = Router()
 
-STICKER_ID = ""  # заполним на шаге 5
+STICKER_ID = "CAACAgEAAxkBAAIBEWqaaTzKA7dN4cdXIUAiph9ADO-fAAL7AAPFiJwE5Su2-pBEE3M9BA"
 
 
 def more_sets_keyboard():
