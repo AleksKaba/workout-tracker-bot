@@ -115,3 +115,120 @@ def get_workout_history(user_id, limit=10):
         })
     conn.close()
     return history
+
+
+def get_recent_workouts(user_id, limit=10):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """select workout_id, started_at
+           from dim_workout
+           where user_id = %s
+           order by started_at desc
+           limit %s""",
+        (user_id, limit)
+    )
+    workouts = cursor.fetchall()
+
+    result = []
+    for workout_id, started_at in workouts:
+        cursor.execute(
+            """select distinct e.name
+               from fact_workout_set s
+               join dim_exercise e on s.exercise_id = e.exercise_id
+               where s.workout_id = %s
+               order by e.name""",
+            (workout_id,)
+        )
+        names = [row[0] for row in cursor.fetchall()]
+        result.append({
+            "workout_id": workout_id,
+            "started_at": started_at,
+            "exercises": names
+        })
+    conn.close()
+    return result
+
+
+def delete_workout(workout_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("delete from fact_workout_set where workout_id = %s", (workout_id,))
+    cursor.execute("delete from dim_workout where workout_id = %s", (workout_id,))
+    conn.commit()
+    conn.close()
+
+
+def get_workout_exercises(workout_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """select e.exercise_id, e.name, count(*) as set_count
+           from fact_workout_set s
+           join dim_exercise e on s.exercise_id = e.exercise_id
+           where s.workout_id = %s
+           group by e.exercise_id, e.name
+           order by e.name""",
+        (workout_id,)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"exercise_id": r[0], "name": r[1], "set_count": r[2]} for r in rows]
+
+
+def get_exercise_sets(workout_id, exercise_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        """select set_id, set_number, weight_kg, reps
+           from fact_workout_set
+           where workout_id = %s and exercise_id = %s
+           order by set_number""",
+        (workout_id, exercise_id)
+    )
+    rows = cursor.fetchall()
+    conn.close()
+    return [{"set_id": r[0], "set_number": r[1], "weight_kg": r[2], "reps": r[3]} for r in rows]
+
+
+def update_set(set_id, weight_kg, reps):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "update fact_workout_set set weight_kg = %s, reps = %s where set_id = %s",
+        (weight_kg, reps, set_id)
+    )
+    conn.commit()
+    conn.close()
+
+
+def delete_set(set_id, workout_id, exercise_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("delete from fact_workout_set where set_id = %s", (set_id,))
+    cursor.execute(
+        """select set_id from fact_workout_set
+           where workout_id = %s and exercise_id = %s
+           order by set_number""",
+        (workout_id, exercise_id)
+    )
+    remaining = cursor.fetchall()
+    for i, (remaining_set_id,) in enumerate(remaining, start=1):
+        cursor.execute(
+            "update fact_workout_set set set_number = %s where set_id = %s",
+            (i, remaining_set_id)
+        )
+    conn.commit()
+    conn.close()
+
+
+def get_next_set_number(workout_id, exercise_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute(
+        "select coalesce(max(set_number), 0) + 1 from fact_workout_set where workout_id = %s and exercise_id = %s",
+        (workout_id, exercise_id)
+    )
+    result = cursor.fetchone()[0]
+    conn.close()
+    return result
