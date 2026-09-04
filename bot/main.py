@@ -15,6 +15,8 @@ load_dotenv()
 
 router = Router()
 
+background_tasks = set()
+
 STICKER_IDS = [
     "CAACAgIAAxkBAAIBRWqaclgHzj6lXSLV7iZgiCy0JEi_AAI_WQACxj84SfO3jPslJV86PQQ",
     "CAACAgIAAxkBAAIBQ2qackEuSMLOLr8HD6iwMxcqdIIMAALdeAAClqSJSlinhFLFs08kPQQ",
@@ -26,8 +28,34 @@ STICKER_IDS = [
 def more_sets_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Ещё подход", callback_data="more_set_yes")],
-        [InlineKeyboardButton(text="Закончил упражнение", callback_data="more_set_done")]
+        [InlineKeyboardButton(text="Закончил упражнение", callback_data="more_set_done")],
+        [
+            InlineKeyboardButton(text="⏱ 120 сек", callback_data="timer_120"),
+            InlineKeyboardButton(text="⏱ 180 сек", callback_data="timer_180"),
+            InlineKeyboardButton(text="⏱ 300 сек", callback_data="timer_300"),
+        ]
     ])
+
+
+def timer_keyboard():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⏱ 120 сек", callback_data="timer_120"),
+            InlineKeyboardButton(text="⏱ 180 сек", callback_data="timer_180"),
+            InlineKeyboardButton(text="⏱ 300 сек", callback_data="timer_300"),
+        ]
+    ])
+
+
+async def run_rest_timer(bot: Bot, chat_id: int, seconds: int):
+    await asyncio.sleep(seconds)
+    await bot.send_message(chat_id, "⏰ Отдых окончен! Время следующего подхода 💪")
+
+
+def schedule_rest_timer(bot: Bot, chat_id: int, seconds: int):
+    task = asyncio.create_task(run_rest_timer(bot, chat_id, seconds))
+    background_tasks.add(task)
+    task.add_done_callback(background_tasks.discard)
 
 
 def yes_no_keyboard(yes_data, no_data, yes_text="Да", no_text="Нет"):
@@ -197,6 +225,13 @@ async def handle_weight_reps(message: Message, state: FSMContext):
     )
 
 
+@router.callback_query(F.data.startswith("timer_"))
+async def handle_timer_button(callback: CallbackQuery):
+    seconds = int(callback.data.split("_")[1])
+    schedule_rest_timer(callback.bot, callback.message.chat.id, seconds)
+    await callback.answer(f"Таймер запущен на {seconds} сек ⏱")
+
+
 @router.callback_query(F.data == "more_set_yes", WorkoutStates.waiting_more_sets)
 async def handle_more_set_yes(callback: CallbackQuery, state: FSMContext):
     await state.set_state(WorkoutStates.waiting_weight_reps)
@@ -215,7 +250,7 @@ async def handle_more_set_done(callback: CallbackQuery, state: FSMContext):
     await state.update_data(exercises=exercises)
     await state.set_state(WorkoutStates.waiting_exercise_number)
     await callback.message.answer(format_exercise_summary(exercise))
-    await callback.message.answer(format_exercise_list(exercises))
+    await callback.message.answer(format_exercise_list(exercises), reply_markup=timer_keyboard())
     await callback.answer()
 
 
