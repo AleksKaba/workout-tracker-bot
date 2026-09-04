@@ -5,7 +5,7 @@ from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, BotCommand
 from dotenv import load_dotenv
 
 from states import WorkoutStates, DeleteStates, EditStates
@@ -478,6 +478,14 @@ async def main():
     bot = Bot(token=os.getenv("BOT_TOKEN"))
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
+
+    await bot.set_my_commands([
+        BotCommand(command="start", description="Начать новую тренировку"),
+        BotCommand(command="history", description="Посмотреть историю тренировок"),
+        BotCommand(command="edit", description="Изменить тренировку"),
+        BotCommand(command="delete", description="Удалить тренировку"),
+    ])
+
     await dp.start_polling(bot)
 
 
