@@ -57,14 +57,14 @@ def create_workout(user_id):
     return workout_id
 
 
-def insert_set(workout_id, exercise_id, set_number, weight_kg, reps):
+def insert_set(workout_id, exercise_id, set_number, weight_kg, reps, comment=None):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
         """insert into fact_workout_set
-           (workout_id, exercise_id, set_number, weight_kg, reps)
-           values (%s, %s, %s, %s, %s)""",
-        (workout_id, exercise_id, set_number, weight_kg, reps)
+           (workout_id, exercise_id, set_number, weight_kg, reps, comment)
+           values (%s, %s, %s, %s, %s, %s)""",
+        (workout_id, exercise_id, set_number, weight_kg, reps, comment)
     )
     conn.commit()
     conn.close()
@@ -97,7 +97,7 @@ def get_workout_history(user_id, limit=10):
     history = []
     for workout_id, started_at, notes in workouts:
         cursor.execute(
-            """select e.name, s.set_number, s.weight_kg, s.reps
+            """select e.name, s.set_number, s.weight_kg, s.reps, s.comment
                from fact_workout_set s
                join dim_exercise e on s.exercise_id = e.exercise_id
                where s.workout_id = %s
@@ -106,8 +106,8 @@ def get_workout_history(user_id, limit=10):
         )
         rows = cursor.fetchall()
         exercises = {}
-        for name, set_number, weight, reps in rows:
-            exercises.setdefault(name, []).append((set_number, weight, reps))
+        for name, set_number, weight, reps, comment in rows:
+            exercises.setdefault(name, []).append((set_number, weight, reps, comment))
         history.append({
             "started_at": started_at,
             "notes": notes,
@@ -180,7 +180,7 @@ def get_exercise_sets(workout_id, exercise_id):
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute(
-        """select set_id, set_number, weight_kg, reps
+        """select set_id, set_number, weight_kg, reps, comment
            from fact_workout_set
            where workout_id = %s and exercise_id = %s
            order by set_number""",
@@ -188,7 +188,10 @@ def get_exercise_sets(workout_id, exercise_id):
     )
     rows = cursor.fetchall()
     conn.close()
-    return [{"set_id": r[0], "set_number": r[1], "weight_kg": r[2], "reps": r[3]} for r in rows]
+    return [
+        {"set_id": r[0], "set_number": r[1], "weight_kg": r[2], "reps": r[3], "comment": r[4]}
+        for r in rows
+    ]
 
 
 def update_set(set_id, weight_kg, reps):

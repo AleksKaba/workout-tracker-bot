@@ -1,6 +1,7 @@
 import asyncio
 import os
 import random
+import re
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -16,6 +17,35 @@ load_dotenv()
 router = Router()
 
 background_tasks = set()
+active_timers = {}
+
+CATEGORIES = ["Ноги", "Плечи", "Грудь", "Спина", "Бицепс", "Трицепс"]
+
+CATEGORY_EXERCISES = {
+    "Ноги": ["Присед", "Выпады", "Жим ногами", "Сгибание ног", "Разгибание ног", "Икры"],
+    "Плечи": ["Жим гантелей стоя", "Махи в стороны", "Махи в наклоне", "Жим Арнольда"],
+    "Грудь": ["Жим лёжа", "Жим гантелей лёжа", "Разводка гантелей", "Отжимания"],
+    "Спина": ["Тяга штанги", "Тяга блока", "Подтягивания", "Гиперэкстензия"],
+    "Бицепс": ["Подъём на бицепс", "Молотки", "Концентрированный подъём"],
+    "Трицепс": ["Французский жим", "Разгибание на блоке", "Отжимания на брусьях"],
+}
+
+SET_INPUT_RE = re.compile(
+    r'^(\d+(?:[.,]\d+)?)\s*(?:кг)?\.?\s*[/\s]+\s*(\d+)\s*(.*)$',
+    re.IGNORECASE
+)
+
+
+def parse_set_input(text):
+    match = SET_INPUT_RE.match(text.strip())
+    if not match:
+        return None
+    weight_str, reps_str, comment = match.groups()
+    weight = float(weight_str.replace(",", "."))
+    reps = int(reps_str)
+    comment = comment.strip() or None
+    return weight, reps, comment
+
 
 STICKER_IDS = [
     "CAACAgIAAxkBAAIBRWqaclgHzj6lXSLV7iZgiCy0JEi_AAI_WQACxj84SfO3jPslJV86PQQ",
@@ -27,7 +57,6 @@ STICKER_IDS = [
 
 def more_sets_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Ещё подход", callback_data="more_set_yes")],
         [InlineKeyboardButton(text="Закончил упражнение", callback_data="more_set_done")],
         [
             InlineKeyboardButton(text="⏱ 120 сек", callback_data="timer_120"),
@@ -48,14 +77,34 @@ def timer_keyboard():
 
 
 async def run_rest_timer(bot: Bot, chat_id: int, seconds: int):
-    await asyncio.sleep(seconds)
-    await bot.send_message(chat_id, "⏰ Отдых окончен! Время следующего подхода 💪")
+    try:
+        await asyncio.sleep(seconds)
+        await bot.send_message(chat_id, "⏰ Отдых окончен! Время следующего подхода 💪")
+    except asyncio.CancelledError:
+        pass
 
 
 def schedule_rest_timer(bot: Bot, chat_id: int, seconds: int):
+    old_task = active_timers.get(chat_id)
+    if old_task and not old_task.done():
+        old_task.cancel()
+
     task = asyncio.create_task(run_rest_timer(bot, chat_id, seconds))
+    active_timers[chat_id] = task
     background_tasks.add(task)
-    task.add_done_callback(background_tasks.discard)
+
+    def _cleanup(finished_task, chat_id=chat_id):
+        background_tasks.discard(finished_task)
+        if active_timers.get(chat_id) is finished_task:
+            active_timers.pop(chat_id, None)
+
+    task.add_done_callback(_cleanup)
+
+
+def cancel_active_timer(chat_id: int):
+    task = active_timers.get(chat_id)
+    if task and not task.done():
+        task.cancel()
 
 
 def yes_no_keyboard(yes_data, no_data, yes_text="Да", no_text="Нет"):
@@ -78,8 +127,25 @@ def format_exercise_list(exercises):
 
 def format_exercise_summary(exercise):
     lines = [f"{exercise['name']} — {len(exercise['sets'])} подход(ов):"]
-    for i, (weight, reps) in enumerate(exercise["sets"], start=1):
-        lines.append(f"{i}) {weight}x{reps}")
+    for i, s in enumerate(exercise["sets"], start=1):
+        weight, reps, comment = s
+        line = f"{i}) {weight}кг/{reps}"
+        if comment:
+            line += f" — {comment}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def format_exercise_progress(exercise):
+    lines = [f"{exercise['number']}. {exercise['name']}:"]
+    for i, s in enumerate(exercise["sets"], start=1):
+        weight, reps, comment = s
+        line = f"{i}) {weight}кг/{reps}"
+        if comment:
+            line += f" — {comment}"
+        lines.append(line)
+    next_i = len(exercise["sets"]) + 1
+    lines.append(f"{next_i}) Подход - напишите вес и количество повторений, пример: 80кг/5")
     return "\n".join(lines)
 
 
@@ -89,8 +155,14 @@ def format_full_summary(exercises):
     for ex in exercises:
         if not ex["sets"]:
             continue
-        set_parts = " ".join(f"{i}) {w}х{r}" for i, (w, r) in enumerate(ex["sets"], start=1))
-        lines.append(f"{n}. {ex['name']} {len(ex['sets'])} подход(ов): {set_parts}")
+        set_parts = []
+        for i, s in enumerate(ex["sets"], start=1):
+            weight, reps, comment = s
+            part = f"{i}) {weight}кг/{reps}"
+            if comment:
+                part += f" ({comment})"
+            set_parts.append(part)
+        lines.append(f"{n}. {ex['name']} {len(ex['sets'])} подход(ов): {' '.join(set_parts)}")
         n += 1
     return "\n".join(lines) if lines else "Подходов не было."
 
@@ -114,7 +186,10 @@ def format_exercises_for_edit(exercises):
 def format_sets_for_edit(exercise, sets):
     lines = [f"{exercise['name']}:"]
     for s in sets:
-        lines.append(f"{s['set_number']}) {s['weight_kg']}x{s['reps']}")
+        line = f"{s['set_number']}) {s['weight_kg']}кг/{s['reps']}"
+        if s.get("comment"):
+            line += f" — {s['comment']}"
+        lines.append(line)
     lines.append("")
     lines.append("Отправьте номер подхода, чтобы изменить его вес/повторения.")
     lines.append("Напишите «удалить N», чтобы удалить подход N.")
@@ -128,7 +203,26 @@ def templates_choice_keyboard(templates):
         [InlineKeyboardButton(text=t["name"], callback_data=f"tpl_{t['template_id']}")]
         for t in templates
     ]
-    rows.append([InlineKeyboardButton(text="🆕 Новый список", callback_data="tpl_new")])
+    rows.append([InlineKeyboardButton(text="📋 Выбрать по группам мышц", callback_data="cat_start")])
+    rows.append([InlineKeyboardButton(text="🆕 Свой список", callback_data="tpl_new")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def category_keyboard(selected):
+    rows = []
+    for cat in CATEGORIES:
+        mark = "✅ " if cat in selected else ""
+        rows.append([InlineKeyboardButton(text=f"{mark}{cat}", callback_data=f"catsel_{cat}")])
+    rows.append([InlineKeyboardButton(text="Готово ▶", callback_data="cat_confirm")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def exercise_multiselect_keyboard(names, selected):
+    rows = []
+    for name in names:
+        mark = "✅ " if name in selected else ""
+        rows.append([InlineKeyboardButton(text=f"{mark}{name}", callback_data=f"exsel_{name}")])
+    rows.append([InlineKeyboardButton(text="Начать тренировку ▶", callback_data="ex_confirm")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -160,18 +254,11 @@ async def start_workout(message: Message, state: FSMContext):
     await state.update_data(workout_id=workout_id, user_id=user_id)
 
     templates = db.get_templates(user_id)
-    if templates:
-        await state.set_state(WorkoutStates.waiting_template_choice)
-        await message.answer(
-            "Тренировка начата. Выберите шаблон или начните новый список:",
-            reply_markup=templates_choice_keyboard(templates)
-        )
-    else:
-        await state.set_state(WorkoutStates.waiting_exercise_list)
-        await message.answer(
-            "Тренировка начата. Перечислите упражнения на сегодня через запятую, "
-            "например: Присед, Отжимания, Тяга"
-        )
+    await state.set_state(WorkoutStates.waiting_template_choice)
+    await message.answer(
+        "Тренировка начата. Выберите вариант:",
+        reply_markup=templates_choice_keyboard(templates)
+    )
 
 
 @router.callback_query(F.data == "tpl_new", WorkoutStates.waiting_template_choice)
@@ -180,6 +267,103 @@ async def handle_template_new(callback: CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "Перечислите упражнения на сегодня через запятую, например: Присед, Отжимания, Тяга"
     )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cat_start", WorkoutStates.waiting_template_choice)
+async def handle_category_start(callback: CallbackQuery, state: FSMContext):
+    await state.update_data(selected_categories=set())
+    await state.set_state(WorkoutStates.waiting_category_choice)
+    await callback.message.edit_text(
+        "Выберите одну или несколько групп мышц:",
+        reply_markup=category_keyboard(set())
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("catsel_"), WorkoutStates.waiting_category_choice)
+async def handle_category_toggle(callback: CallbackQuery, state: FSMContext):
+    cat = callback.data[len("catsel_"):]
+    data = await state.get_data()
+    selected = set(data.get("selected_categories", set()))
+    if cat in selected:
+        selected.discard(cat)
+    else:
+        selected.add(cat)
+    await state.update_data(selected_categories=selected)
+    await callback.message.edit_reply_markup(reply_markup=category_keyboard(selected))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "cat_confirm", WorkoutStates.waiting_category_choice)
+async def handle_category_confirm(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = data.get("selected_categories", set())
+    if not selected:
+        await callback.answer("Выберите хотя бы одну группу мышц", show_alert=True)
+        return
+
+    names = []
+    seen = set()
+    for cat in CATEGORIES:
+        if cat not in selected:
+            continue
+        for name in CATEGORY_EXERCISES.get(cat, []):
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+
+    await state.update_data(catalog_names=names, selected_exercises=set())
+    await state.set_state(WorkoutStates.waiting_category_exercise_choice)
+    await callback.message.edit_text(
+        "Выберите упражнения на сегодня:",
+        reply_markup=exercise_multiselect_keyboard(names, set())
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("exsel_"), WorkoutStates.waiting_category_exercise_choice)
+async def handle_exercise_toggle(callback: CallbackQuery, state: FSMContext):
+    name = callback.data[len("exsel_"):]
+    data = await state.get_data()
+    selected = set(data.get("selected_exercises", set()))
+    if name in selected:
+        selected.discard(name)
+    else:
+        selected.add(name)
+    await state.update_data(selected_exercises=selected)
+    catalog_names = data.get("catalog_names", [])
+    await callback.message.edit_reply_markup(
+        reply_markup=exercise_multiselect_keyboard(catalog_names, selected)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "ex_confirm", WorkoutStates.waiting_category_exercise_choice)
+async def handle_exercise_confirm(callback: CallbackQuery, state: FSMContext):
+    data = await state.get_data()
+    selected = data.get("selected_exercises", set())
+    if not selected:
+        await callback.answer("Выберите хотя бы одно упражнение", show_alert=True)
+        return
+
+    catalog_names = data.get("catalog_names", [])
+    chosen_names = [n for n in catalog_names if n in selected]
+
+    exercises = []
+    for i, name in enumerate(chosen_names, start=1):
+        exercise_id = db.get_or_create_exercise(name)
+        exercises.append({
+            "number": i,
+            "name": name,
+            "exercise_id": exercise_id,
+            "done": False,
+            "sets": []
+        })
+
+    await state.update_data(exercises=exercises)
+    await state.set_state(WorkoutStates.waiting_exercise_number)
+    await callback.message.edit_text(format_exercise_list(exercises))
     await callback.answer()
 
 
@@ -276,46 +460,57 @@ async def handle_exercise_number(message: Message, state: FSMContext):
         return
 
     await state.update_data(current_exercise_number=number)
-    await state.set_state(WorkoutStates.waiting_weight_reps)
-    await message.answer(f"«{exercise['name']}». Вес и повторения через пробел (например: 80 8)")
+    await state.set_state(WorkoutStates.waiting_set_input)
+    await message.answer(format_exercise_progress(exercise), reply_markup=more_sets_keyboard())
 
 
-@router.message(WorkoutStates.waiting_weight_reps)
-async def handle_weight_reps(message: Message, state: FSMContext):
-    parts = message.text.strip().split()
-    if len(parts) != 2:
-        await message.answer("Не понял. Введите вес и повторения через пробел, например: 80 8")
+@router.message(WorkoutStates.waiting_set_input)
+async def handle_set_input(message: Message, state: FSMContext):
+    text = message.text.strip()
+
+    if text.lower() in ("готово", "закончил", "конец"):
+        cancel_active_timer(message.chat.id)
+        data = await state.get_data()
+        exercises = data["exercises"]
+        number = data["current_exercise_number"]
+        exercise = next(e for e in exercises if e["number"] == number)
+        exercise["done"] = True
+        await state.update_data(exercises=exercises)
+        await state.set_state(WorkoutStates.waiting_exercise_number)
+        await message.answer(format_exercise_summary(exercise))
+        await message.answer(format_exercise_list(exercises), reply_markup=timer_keyboard())
         return
-    weight_str, reps_str = parts
-    try:
-        weight = float(weight_str.replace(",", "."))
-        reps = int(reps_str)
-    except ValueError:
-        await message.answer("Вес — число, повторения — целое число. Попробуйте ещё раз.")
+
+    parsed = parse_set_input(text)
+    if parsed is None:
+        await message.answer(
+            "Не понял формат. Пример: 80кг/5 (можно добавить комментарий: 80кг/5 было тяжело), "
+            "или напишите «готово», чтобы закончить упражнение."
+        )
         return
+    weight, reps, comment = parsed
+
+    cancel_active_timer(message.chat.id)
 
     data = await state.get_data()
     exercises = data["exercises"]
     number = data["current_exercise_number"]
     exercise = next(e for e in exercises if e["number"] == number)
 
-    set_number = len(exercise["sets"]) + 1
-    exercise["sets"].append((weight, reps))
+    exercise["sets"].append((weight, reps, comment))
+    set_number = len(exercise["sets"])
 
     db.insert_set(
         workout_id=data["workout_id"],
         exercise_id=exercise["exercise_id"],
         set_number=set_number,
         weight_kg=weight,
-        reps=reps
+        reps=reps,
+        comment=comment
     )
 
     await state.update_data(exercises=exercises)
-    await state.set_state(WorkoutStates.waiting_more_sets)
-    await message.answer(
-        f"Вы сделали {set_number} подход {weight}x{reps}",
-        reply_markup=more_sets_keyboard()
-    )
+    await message.answer(format_exercise_progress(exercise), reply_markup=more_sets_keyboard())
 
 
 @router.callback_query(F.data.startswith("timer_"))
@@ -325,19 +520,19 @@ async def handle_timer_button(callback: CallbackQuery):
     await callback.answer(f"Таймер запущен на {seconds} сек ⏱")
 
 
-@router.callback_query(F.data == "more_set_yes", WorkoutStates.waiting_more_sets)
-async def handle_more_set_yes(callback: CallbackQuery, state: FSMContext):
-    await state.set_state(WorkoutStates.waiting_weight_reps)
-    await callback.message.answer("Вес и повторения через пробел (например: 80 8)")
-    await callback.answer()
-
-
-@router.callback_query(F.data == "more_set_done", WorkoutStates.waiting_more_sets)
+@router.callback_query(F.data == "more_set_done")
 async def handle_more_set_done(callback: CallbackQuery, state: FSMContext):
+    cancel_active_timer(callback.message.chat.id)
     data = await state.get_data()
+    if "exercises" not in data or "current_exercise_number" not in data:
+        await callback.answer()
+        return
     exercises = data["exercises"]
     number = data["current_exercise_number"]
-    exercise = next(e for e in exercises if e["number"] == number)
+    exercise = next((e for e in exercises if e["number"] == number), None)
+    if exercise is None:
+        await callback.answer()
+        return
     exercise["done"] = True
 
     await state.update_data(exercises=exercises)
@@ -371,7 +566,13 @@ async def show_history(message: Message):
         date_str = workout["started_at"].strftime("%d.%m.%Y %H:%M")
         lines = [f"📅 {date_str}"]
         for exercise_name, sets in workout["exercises"].items():
-            sets_str = ", ".join(f"{w}x{r}" for _, w, r in sets)
+            parts = []
+            for _, weight, reps, comment in sets:
+                part = f"{weight}кг/{reps}"
+                if comment:
+                    part += f" ({comment})"
+                parts.append(part)
+            sets_str = ", ".join(parts)
             lines.append(f"— {exercise_name}: {len(sets)} подход(ов) ({sets_str})")
         if workout["notes"]:
             lines.append(f"Заметка: {workout['notes']}")
